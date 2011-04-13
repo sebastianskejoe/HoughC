@@ -15,7 +15,7 @@
 
 unsigned char *data, *map, *edge, *hough, *angle;
 int x, y, z, n;
-int cx, cy, radius;
+int cx, cy, radius, max_hits;
 int done;
 char do_hough;
 
@@ -29,6 +29,9 @@ struct thread_arg_struct {
 	int *x0, *y0, *r0, *max;
 };
 
+/*
+Converts a color map of n components to a binary map
+*/
 void convert_to_bin(unsigned char *in, unsigned char *out) {
 	int i, j;
 	// Convert to binary map
@@ -41,6 +44,9 @@ void convert_to_bin(unsigned char *in, unsigned char *out) {
 	}
 }
 
+/*
+Detects edges using the sobel operator
+*/
 void edge_sobel(unsigned char *in, unsigned char *out) {
 	int i, j, Gx, Gy, G;
 	// Edge detect - sobel operator
@@ -56,18 +62,6 @@ void edge_sobel(unsigned char *in, unsigned char *out) {
 			// Clamp to [0,255]
 			if (G >= 255) {
 				out[j*x+i] = 255;
-
-				// Edge direction
-				if (Gx == 0) {
-					if (Gy == 0) {
-						angle[j*x+i] = 0.0f;
-					} else {
-						angle[j*x+i] = M_PI_2;
-					}
-				} else {
-					angle[j*x+i] = atanf((float)Gy/(float)Gx);
-				}
-
 			} else {
 				out[j*x+i] = 0;
 			}
@@ -75,42 +69,9 @@ void edge_sobel(unsigned char *in, unsigned char *out) {
 	}
 }
 
-void thin(unsigned char *in, unsigned char *out) {
-	int i, j;
-	char n,t;
-	printf("Starting thinning\n");
-	// Ignore first and last pixel of rows and columns
-	for (j = 0; j < y-1; j++) {
-		for (i = 0; i < x-1; i++) {
-			// Only look at white pixels
-			if (in[j*x+i]) {
-				// Get number of white pixels around
-				n = in[(j-1)*x+i-1] + in[(j-1)*x+i] + in[(j-1)*x+i+1] // three pixels above
-					+ in[j*x+i-1] + in[j*x+i+1] // side pixels
-					+ in[(j+1)*x+i-1] + in[(j+1)*x+i] + in[(j+1)*x+i+1];
-				t = (1-in[(j-1)*x+i-1]) + (1-in[(j-1)*x+i]) + (1-in[(j-1)*x+i+1]) // three pixels above
-					+ (1-in[j*x+i-1]) + (1-in[j*x+i+1]) // side pixels
-					+ (1-in[(j+1)*x+i-1]) + (1-in[(j+1)*x+i]) + (1-in[(j+1)*x+i+1]);
-
-				switch (n) {
-				case(0): // alone
-				case(1): // tip
-				case(7):
-				case(8):
-					break;
-				default:
-					if (t > 1) {
-						break;
-					}
-					printf("Thinning at (%d,%d)\n", i, j);
-					out[j*x+i] = 0;
-					break;
-				}
-			}
-		}
-	}
-}
-
+/*
+The thread routine to calculate the circles centre
+*/
 void *thread_hough(void *arg) {
 	struct thread_arg_struct *args = (struct thread_arg_struct*)arg;
 	printf("Starting thread %lu - looping through %d rows, starting at %d\n", pthread_self(), args->rows, args->start);
@@ -118,17 +79,15 @@ void *thread_hough(void *arg) {
 	memset(hough, 0, sizeof(int)*x*y*z);
 	int max, j, i, ux, uy, xh, yh, r;
 
-	pthread_mutex_lock(&mutex);
-	thread_count++;
-	pthread_mutex_unlock(&mutex);
-
 	max = 0;
 
 	for (j = args->start; j < args->start+args->rows; j++) {
 		for (i = 0; i < x; i++) {
 
 		if (args->data[j*x+i]) {
-
+	
+			// This is a simple(read stupid) optimization - assumes that radii of circles is no bigger than the half of
+			// the image size.
 //			if (args->opt) {
 				ux = x < i+x/2 ? x : i+x/2;
 				uy = y < j+y/2 ? y : j+y/2;
@@ -140,11 +99,15 @@ void *thread_hough(void *arg) {
 			for (xh = 0; xh < ux; xh++) {
 				for (yh = 0; yh < uy; yh++) {
 					r = sqrt((i-xh)*(i-xh)+(j-yh)*(j-yh));
-					if (r < 0 || r >= 200) {
+
+					// Maximum radius is z
+					if (r < 0 || r >= z) {
 						continue;
 					}
+
 					hough[yh*x*z+xh*z+r] += 1;
 
+					// New max
 					if (hough[yh*x*z+xh*z+r] > max) {
 						max = hough[yh*x*z+xh*z+r];
 						*(args->x0) = xh;
@@ -159,11 +122,6 @@ void *thread_hough(void *arg) {
 		}
 	}
 
-	pthread_mutex_lock(&mutex);
-	thread_count--;
-	done = 1;
-	pthread_mutex_unlock(&mutex);
-
 	free(hough);
 	hough = 0;
 
@@ -171,7 +129,15 @@ void *thread_hough(void *arg) {
 	pthread_exit(0);
 }
 
+/*
+Key func
+Spawns 'key' number of threads
+*/
 void key(unsigned char key, int kx, int ky) {
+	if (key > '9' || key <= '0') {
+		return;
+	}
+
 	int num = key-'0';
 	int i;
 	pthread_t threads[num];
@@ -198,6 +164,16 @@ void key(unsigned char key, int kx, int ky) {
 		pthread_join(threads[i], 0);
 	}
 
+	// Find max
+	for (i = 0; i < num; i++) {
+		if (*thread_args[i].max > max_hits) {
+			max_hits = *(thread_args[i].max);
+			cx = *(thread_args[i].x0);
+			cy = *(thread_args[i].y0);
+			radius = *(thread_args[i].r0);
+		}
+	}
+
 	end = time(0);
 	printf("Start: %d - End: %d - Diff: %d\n", (int)start, (int)end, (int)end-(int)start);
 	glutPostRedisplay();
@@ -208,9 +184,7 @@ void draw() {
 	if (!done) {
 		convert_to_bin(data, map);
 		edge_sobel(map, edge);
-		thin(edge,edge);
 	}
-	done = 1;
 	glLoadIdentity();
 
 	// Draw map and hough
@@ -241,17 +215,19 @@ int main(int argc, char *argv[]) {
 	}
 	unsigned char *dat = data;
 
+	max_hits = 0;
+
 	z = x; // probably too much
 	map = malloc(sizeof(unsigned char)*x*y);
 	edge = malloc(sizeof(unsigned char)*x*y);
 	angle = malloc(sizeof(float)*x*y);
 	hough = malloc(sizeof(short)*x*y*z);
-	done = 0;
 
 	memset(map, 0, sizeof(unsigned char)*x*y);
 	memset(edge, 0, sizeof(unsigned char)*x*y);
 	memset(angle, 0, sizeof(float)*x*y);
 	memset(hough, 0, sizeof(short)*x*y*z);
+
 	glutInit(&argc, argv);
 	glutInitDisplayMode(GLUT_DEPTH | GLUT_SINGLE | GLUT_RGBA);
 	glutInitWindowPosition(0,0);
@@ -262,7 +238,6 @@ int main(int argc, char *argv[]) {
 	glutKeyboardFunc(key);
 
 	glutMainLoop();
-	draw();
 
 	pthread_exit(0);
 

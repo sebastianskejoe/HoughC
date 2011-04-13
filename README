@@ -1,0 +1,21 @@
+A simple hough transformation application written in C
+
+Status April 13th:
+====================
+Find centre of a black and white image correctly in a simple threaded way
+
+Problems:
+* At the moment threads are created in a way so that each thread will handle a certain number of rows and then quit. No
+  new threads are created when threads finish, which means that often all but one thread will quit leaving one or more
+  cores unused on mulitcore processors
+* Memory usage is quite high
+* Sobel operator gives a two pixel edge of white area which doubles the number of nescessay calculations
+
+Optimizations to be done:
+* Spawn a new thread when another thread quits. This will mean full usage of all cores during the whole calculation.
+* Use SIMD of some sort to calculate the square root in thread_hough
+* Implement thinning to make edges one pixel
+
+Other things:
+* Color filtering of color images would be a nice addition(easy to implement)
+* Refactor code. A lot of globals are used which causes all code to be in one file.
